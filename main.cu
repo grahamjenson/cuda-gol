@@ -5,41 +5,61 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <sys/time.h>
+#include <algorithm>
 
-#define SIZE 32
 // Max threadsize is 1024 32*32
+typedef unsigned char ubyte;
 
-void printWorld(short *board);
-void zeroWorld(short *board);
+void printWorld(ubyte *board, uint size);
+void zeroWorld(ubyte *board, uint size);
 
-__device__ __host__ short coords(short x, short y, short size);
+int coords(int x, int y, int size);
 
-__global__ void playTurn(short *inboard, short *outboard, short size)
+__global__ void playTurn(ubyte *inboard, ubyte *bufferboard, short size)
 {
     short x = threadIdx.x;
     short y = threadIdx.y;
 
-    short val = inboard[coords(x - 1, y - 1, size)] + inboard[coords(x - 1, y, size)] + inboard[coords(x - 1, y + 1, size)] + inboard[coords(x, y - 1, size)] + inboard[coords(x, y + 1, size)] + inboard[coords(x + 1, y - 1, size)] + inboard[coords(x + 1, y, size)] + inboard[coords(x + 1, y + 1, size)];
-    bool alive = inboard[coords(x, y, size)] == 1;
+    short xLeft = ((x + size) - 1) % size;
+    short xRight = (x + 1) % size;
+    short yUp = (y + 1) % size;
+    short yDown = (y + size - 1) % size;
+    short yAbs = size * y;
+    short yUpAbs = yUp * size;
+    short yDownAbs = yDown * size;
+
+    short Abs = x + yAbs;
+    short aliveCells = inboard[xLeft + yUpAbs] + inboard[x + yUpAbs] + inboard[xRight + yUpAbs] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yDownAbs] + inboard[x + yDownAbs] + inboard[xRight + yDownAbs];
 
     //Any live cell with two or three live neighbours survives.
     //Any dead cell with three live neighbours becomes a live cell.
     //All other live cells die in the next generation. Similarly, all other dead cells stay dead.
-    if (alive && (val == 2 || val == 3))
+    bufferboard[Abs] = aliveCells == 3 || (aliveCells == 2 && inboard[Abs]) ? 1 : 0;
+}
+
+__global__ void simpleLifeKernel(const ubyte *inboard, ubyte *bufferboard, uint size)
+{
+    uint worldSize = size * size;
+
+    for (uint cellId = __mul24(blockIdx.x, blockDim.x) + threadIdx.x;
+         cellId < worldSize;
+         cellId += blockDim.x * gridDim.x)
     {
-        outboard[coords(x, y, size)] = 1;
-    }
-    else if (!alive && val == 3)
-    {
-        outboard[coords(x, y, size)] = 1;
-    }
-    else
-    {
-        outboard[coords(x, y, size)] = 0;
+        uint x = cellId % size;
+        uint yAbs = cellId - x;
+        uint xLeft = (x + size - 1) % size;
+        uint xRight = (x + 1) % size;
+        uint yAbsUp = (yAbs + worldSize - size) % worldSize;
+        uint yAbsDown = (yAbs + size) % worldSize;
+
+        uint aliveCells = inboard[xLeft + yAbsUp] + inboard[x + yAbsUp] + inboard[xRight + yAbsUp] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yAbsDown] + inboard[x + yAbsDown] + inboard[xRight + yAbsDown];
+
+        bufferboard[x + yAbs] =
+            aliveCells == 3 || (aliveCells == 2 && inboard[x + yAbs]) ? 1 : 0;
     }
 }
 
-__device__ __host__ short coords(short x, short y, short size)
+int coords(int x, int y, int size)
 {
     // Array to single dimension
     /*
@@ -77,7 +97,7 @@ __device__ __host__ short coords(short x, short y, short size)
     return x + (size * y);
 }
 
-void o1(short *board)
+void o1(ubyte *board, uint size)
 {
     const short o1[5][5] = {
         {0, 0, 0, 1, 0},
@@ -91,80 +111,89 @@ void o1(short *board)
     {
         for (x = 0; x < 5; x++)
         {
-            board[coords(x, y, SIZE)] = o1[y][x];
+            board[coords(x, y, size)] = o1[y][x];
         }
     }
 }
 
-void playTurnD(short *board, short *inboard, short *outboard, short boardSize)
-{
-    dim3 threadsPerBlock(SIZE, SIZE);
-    dim3 numBlocks(1);
-    cudaMemcpy(inboard, board, boardSize, cudaMemcpyHostToDevice);
-    playTurn<<<numBlocks, threadsPerBlock>>>(inboard, outboard, SIZE);
-    cudaMemcpy(board, outboard, boardSize, cudaMemcpyDeviceToHost);
-}
-
 int main()
 {
+    uint SIZE = 512;
 
     // boardposition = width*heigth cudaboard[width*height] == position
-    short *board;
-    short boardSize = sizeof(int) * SIZE * SIZE;
-    board = (short *)malloc(boardSize);
-    zeroWorld(board);
-    o1(board);
-    printWorld(board);
-    // CUDA CALC
+    ubyte *board;
+    int boardSize = sizeof(ubyte) * SIZE * SIZE;
+    printf("%d", boardSize);
+    board = (ubyte *)malloc(boardSize);
+    zeroWorld(board, SIZE);
+    o1(board, SIZE);
+    printWorld(board, SIZE);
 
-    short *inboard, *outboard;
+    ubyte *inboard, *bufferboard;
     cudaMalloc((void **)&inboard, boardSize);
-    cudaMalloc((void **)&outboard, boardSize);
+    cudaMalloc((void **)&bufferboard, boardSize);
 
+    cudaMemcpy(inboard, board, boardSize, cudaMemcpyHostToDevice);
     // Time some stuff
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
 
-    int turn, turns = 100000;
+    ushort threadsCount = 1024;
+    // dim3 threadsPerBlock(SIZE, SIZE);
+    // dim3 numBlocks(1);
+    assert((SIZE * SIZE) % threadsCount == 0);
+    size_t reqBlocksCount = (SIZE * SIZE) / threadsCount;
+    ushort blocksCount = (ushort)std::min((size_t)32768, reqBlocksCount);
+    printf("blocks %d threads %d", blocksCount, threadsCount);
+    int turn, turns = 1000000;
     for (turn = 0; turn < turns; turn++)
     {
-        playTurnD(board, inboard, outboard, boardSize);
+
+        simpleLifeKernel<<<blocksCount, threadsCount>>>(inboard, bufferboard, SIZE);
+
+        std::swap(inboard, bufferboard);
     }
     gettimeofday(&t1, NULL);
+    cudaMemcpy(board, inboard, boardSize, cudaMemcpyDeviceToHost);
+    printWorld(board, SIZE);
+
     float seconds = t1.tv_sec - t0.tv_sec + 1E-6 * (t1.tv_usec - t0.tv_usec);
-    int MMcellsCalculated = (turns * SIZE * SIZE) / 1000000;
-    printf("Did 1 calls in %f seconds\n", MMcellsCalculated / seconds);
+    int worldsize = SIZE * SIZE;
+    float MM = (turns * 1.0) * worldsize;
+    float MMcellsCalculated = MM / 1000000;
+    float total = MMcellsCalculated / seconds;
+    printf("Did %f million cells per second in %f\n", total, seconds);
 
     cudaFree(inboard);
-    cudaFree(outboard);
+    cudaFree(bufferboard);
     free(board);
 
     return 0;
 }
 
-void zeroWorld(short *board)
+void zeroWorld(ubyte *board, uint size)
 {
-    short x, y;
+    int x, y;
 
-    for (y = 0; y < SIZE; ++y)
+    for (y = 0; y < size; ++y)
     {
-        for (x = 0; x < SIZE; ++x)
+        for (x = 0; x < size; ++x)
         {
-            board[coords(x, y, SIZE)] = 0;
+            board[coords(x, y, size)] = 0;
         }
     }
 }
 
-void printWorld(short *board)
+void printWorld(ubyte *board, uint size)
 {
-    short x, y;
+    int x, y;
 
     printf("   ------   \n");
-    for (y = 0; y < SIZE; y++)
+    for (y = 0; y < size; y++)
     {
-        for (x = 0; x < SIZE; x++)
+        for (x = 0; x < size; x++)
         {
-            printf("%d", board[coords(x, y, SIZE)]);
+            printf("%d", board[coords(x, y, size)]);
         }
         printf("\n");
     }
