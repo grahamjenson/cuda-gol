@@ -107,9 +107,7 @@ void playTurnD(short *board, short *inboard, short *outboard, short boardSize)
 
 int main()
 {
-    // Time some stuff
-    struct timeval t0, t1;
-    gettimeofday(&t0, NULL);
+
     // boardposition = width*heigth cudaboard[width*height] == position
     short *board;
     short boardSize = sizeof(int) * SIZE * SIZE;
@@ -123,19 +121,23 @@ int main()
     cudaMalloc((void **)&inboard, boardSize);
     cudaMalloc((void **)&outboard, boardSize);
 
+    // Time some stuff
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+
     int turn, turns = 100000;
     for (turn = 0; turn < turns; turn++)
     {
         playTurnD(board, inboard, outboard, boardSize);
     }
-    printWorld(board);
+    gettimeofday(&t1, NULL);
+    float seconds = t1.tv_sec - t0.tv_sec + 1E-6 * (t1.tv_usec - t0.tv_usec);
+    int MMcellsCalculated = (turns * SIZE * SIZE) / 1000000;
+    printf("Did 1 calls in %f seconds\n", MMcellsCalculated / seconds);
 
     cudaFree(inboard);
     cudaFree(outboard);
     free(board);
-
-    gettimeofday(&t1, NULL);
-    printf("Did 1 calls in %.2g seconds\n", t1.tv_sec - t0.tv_sec + 1E-6 * (t1.tv_usec - t0.tv_usec));
 
     return 0;
 }
