@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <sys/time.h>
 #include <algorithm>
+#include <unistd.h>
 
 // Max threadsize is 1024 32*32
 typedef unsigned char ubyte;
@@ -15,48 +16,27 @@ void zeroWorld(ubyte *board, uint size);
 
 int coords(int x, int y, int size);
 
-__global__ void playTurn(ubyte *inboard, ubyte *bufferboard, short size)
+__global__ void gameoflifeturn(ubyte *inboard, ubyte *bufferboard, short size)
 {
-    short x = threadIdx.x;
-    short y = threadIdx.y;
 
-    short xLeft = ((x + size) - 1) % size;
-    short xRight = (x + 1) % size;
-    short yUp = (y + 1) % size;
-    short yDown = (y + size - 1) % size;
-    short yAbs = size * y;
-    short yUpAbs = yUp * size;
-    short yDownAbs = yDown * size;
+    uint x = threadIdx.x + (blockDim.x * blockIdx.x);
+    uint y = threadIdx.y + (blockDim.y * blockIdx.y);
+    //printf("(%d,%d) (%d %d) (%d %d) (%d, %d) (%d, %d)\n", x, y, threadIdx.x, threadIdx.y, blockDim.x, blockDim.y, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
+    uint xLeft = ((x + size) - 1) % size;
+    uint xRight = (x + 1) % size;
+    uint yUp = (y + 1) % size;
+    uint yDown = (y + size - 1) % size;
+    uint yAbs = size * y;
+    uint yUpAbs = yUp * size;
+    uint yDownAbs = yDown * size;
 
-    short Abs = x + yAbs;
-    short aliveCells = inboard[xLeft + yUpAbs] + inboard[x + yUpAbs] + inboard[xRight + yUpAbs] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yDownAbs] + inboard[x + yDownAbs] + inboard[xRight + yDownAbs];
+    uint Abs = x + yAbs;
+    uint aliveCells = inboard[xLeft + yUpAbs] + inboard[x + yUpAbs] + inboard[xRight + yUpAbs] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yDownAbs] + inboard[x + yDownAbs] + inboard[xRight + yDownAbs];
 
     //Any live cell with two or three live neighbours survives.
     //Any dead cell with three live neighbours becomes a live cell.
     //All other live cells die in the next generation. Similarly, all other dead cells stay dead.
     bufferboard[Abs] = aliveCells == 3 || (aliveCells == 2 && inboard[Abs]) ? 1 : 0;
-}
-
-__global__ void simpleLifeKernel(const ubyte *inboard, ubyte *bufferboard, uint size)
-{
-    uint worldSize = size * size;
-
-    for (uint cellId = __mul24(blockIdx.x, blockDim.x) + threadIdx.x;
-         cellId < worldSize;
-         cellId += blockDim.x * gridDim.x)
-    {
-        uint x = cellId % size;
-        uint yAbs = cellId - x;
-        uint xLeft = (x + size - 1) % size;
-        uint xRight = (x + 1) % size;
-        uint yAbsUp = (yAbs + worldSize - size) % worldSize;
-        uint yAbsDown = (yAbs + size) % worldSize;
-
-        uint aliveCells = inboard[xLeft + yAbsUp] + inboard[x + yAbsUp] + inboard[xRight + yAbsUp] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yAbsDown] + inboard[x + yAbsDown] + inboard[xRight + yAbsDown];
-
-        bufferboard[x + yAbs] =
-            aliveCells == 3 || (aliveCells == 2 && inboard[x + yAbs]) ? 1 : 0;
-    }
 }
 
 int coords(int x, int y, int size)
@@ -116,53 +96,90 @@ void o1(ubyte *board, uint size)
     }
 }
 
+__global__ void simpleLifeKernel(const ubyte *inboard, ubyte *bufferboard, uint size)
+{
+    uint worldSize = size * size;
+
+    for (uint cellId = __mul24(blockIdx.x, blockDim.x) + threadIdx.x;
+         cellId < worldSize;
+         cellId += blockDim.x * gridDim.x)
+    {
+        uint x = cellId % size;
+        uint yAbs = cellId - x;
+        uint xLeft = (x + size - 1) % size;
+        uint xRight = (x + 1) % size;
+        uint yAbsUp = (yAbs + worldSize - size) % worldSize;
+        uint yAbsDown = (yAbs + size) % worldSize;
+
+        uint aliveCells = inboard[xLeft + yAbsUp] + inboard[x + yAbsUp] + inboard[xRight + yAbsUp] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yAbsDown] + inboard[x + yAbsDown] + inboard[xRight + yAbsDown];
+
+        bufferboard[x + yAbs] =
+            aliveCells == 3 || (aliveCells == 2 && inboard[x + yAbs]) ? 1 : 0;
+    }
+}
+
 int main()
 {
-    uint SIZE = 512;
+    // To keep the math easy (for reasons we will see) the size must be a square of squares, i.e. X^2^2
+    // so the value must be , so the easiest numbers to deal with are 2^n values
+    uint size = 64;
+    uint ncells = size * size;
+    // The max number of threads is 1024, it must be a square number, e.g. X^2 and sqrt()
+    // The number of threads here will describe the number of blocks
+    uint threadsCount = 1024;
+    uint threadDimSize = sqrt(threadsCount);
+    // Threads create a block of sqrt(threadCount)^2
+    dim3 threadsPerBlock(threadDimSize, threadDimSize);
+
+    // Now we need to find the number of blocks this is the size/ThreadDimSize
+    uint blockDimSize = size / threadDimSize;
+    dim3 numBlocks(blockDimSize, blockDimSize);
+
+    // Lets make sure our math is correct
+    // The number of cells is a multiple of threadcount
+    assert(ncells % threadsCount == 0);
+    // the number of blocks * num of threads = size
+    assert(blockDimSize * threadDimSize == size);
+
+    printf("Size %d, ncells %d, Threads: %d, ThreadDimSize %d, BlockDimSize %d\n", size, ncells, threadsCount, threadDimSize, blockDimSize);
 
     // boardposition = width*heigth cudaboard[width*height] == position
     ubyte *board;
-    int boardSize = sizeof(ubyte) * SIZE * SIZE;
-    printf("%d", boardSize);
+    int boardSize = sizeof(ubyte) * ncells;
     board = (ubyte *)malloc(boardSize);
-    zeroWorld(board, SIZE);
-    o1(board, SIZE);
-    printWorld(board, SIZE);
 
+    // Setup the board
+    zeroWorld(board, size);
+    o1(board, size);
+    printWorld(board, size);
+
+    // Set up the Device Memory
     ubyte *inboard, *bufferboard;
     cudaMalloc((void **)&inboard, boardSize);
     cudaMalloc((void **)&bufferboard, boardSize);
-
     cudaMemcpy(inboard, board, boardSize, cudaMemcpyHostToDevice);
+
     // Time some stuff
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
-
-    ushort threadsCount = 1024;
-    // dim3 threadsPerBlock(SIZE, SIZE);
-    // dim3 numBlocks(1);
-    assert((SIZE * SIZE) % threadsCount == 0);
-    size_t reqBlocksCount = (SIZE * SIZE) / threadsCount;
-    ushort blocksCount = (ushort)std::min((size_t)32768, reqBlocksCount);
-    printf("blocks %d threads %d", blocksCount, threadsCount);
-    int turn, turns = 1000000;
+    int turn, turns = 10000;
     for (turn = 0; turn < turns; turn++)
     {
-
-        simpleLifeKernel<<<blocksCount, threadsCount>>>(inboard, bufferboard, SIZE);
-
+        gameoflifeturn<<<numBlocks, threadsPerBlock>>>(inboard, bufferboard, size);
         std::swap(inboard, bufferboard);
     }
     gettimeofday(&t1, NULL);
+
     cudaMemcpy(board, inboard, boardSize, cudaMemcpyDeviceToHost);
-    printWorld(board, SIZE);
+    system("clear");
+    printWorld(board, size);
 
     float seconds = t1.tv_sec - t0.tv_sec + 1E-6 * (t1.tv_usec - t0.tv_usec);
-    int worldsize = SIZE * SIZE;
+    int worldsize = size * size;
     float MM = (turns * 1.0) * worldsize;
-    float MMcellsCalculated = MM / 1000000;
+    float MMcellsCalculated = MM / 1000000000;
     float total = MMcellsCalculated / seconds;
-    printf("Did %f million cells per second in %f\n", total, seconds);
+    printf("Did %f billion cells per second in %f\n", total, seconds);
 
     cudaFree(inboard);
     cudaFree(bufferboard);
