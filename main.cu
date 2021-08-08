@@ -8,17 +8,22 @@
 #include <algorithm>
 #include <unistd.h>
 
+#define max(a, b) (a > b ? a : b)
+#define min(a, b) (a < b ? a : b)
+
 // Max threadsize is 1024 32*32
 typedef unsigned char ubyte;
 
-void printWorld(ubyte *board, uint size);
-void zeroWorld(ubyte *board, uint size);
-
+void printWorld(ubyte *world, uint size);
+void zeroWorld(ubyte *world, uint size);
+void copy(ubyte *pattern, int patternsize, ubyte *world, uint size);
 int coords(int x, int y, int size);
 
-__global__ void gameoflifeturn(ubyte *inboard, ubyte *bufferboard, short size)
+__global__ void gameoflifeturn(ubyte *inworld, ubyte *bufferworld, short size)
 {
 
+    // We need to find the x,y of the cell we are looking at
+    // Because this is a 1d array we have to do some maths.
     uint x = threadIdx.x + (blockDim.x * blockIdx.x);
     uint y = threadIdx.y + (blockDim.y * blockIdx.y);
     //printf("(%d,%d) (%d %d) (%d %d) (%d, %d) (%d, %d)\n", x, y, threadIdx.x, threadIdx.y, blockDim.x, blockDim.y, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
@@ -31,103 +36,29 @@ __global__ void gameoflifeturn(ubyte *inboard, ubyte *bufferboard, short size)
     uint yDownAbs = yDown * size;
 
     uint Abs = x + yAbs;
-    uint aliveCells = inboard[xLeft + yUpAbs] + inboard[x + yUpAbs] + inboard[xRight + yUpAbs] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yDownAbs] + inboard[x + yDownAbs] + inboard[xRight + yDownAbs];
+    uint aliveCells = inworld[xLeft + yUpAbs] + inworld[x + yUpAbs] + inworld[xRight + yUpAbs] + inworld[xLeft + yAbs] + inworld[xRight + yAbs] + inworld[xLeft + yDownAbs] + inworld[x + yDownAbs] + inworld[xRight + yDownAbs];
 
     //Any live cell with two or three live neighbours survives.
     //Any dead cell with three live neighbours becomes a live cell.
     //All other live cells die in the next generation. Similarly, all other dead cells stay dead.
-    bufferboard[Abs] = aliveCells == 3 || (aliveCells == 2 && inboard[Abs]) ? 1 : 0;
-}
-
-int coords(int x, int y, int size)
-{
-    // Array to single dimension
-    /*
-    e.g. 3/3 should be
-    x,y
-    0,0 = 0
-    1,0 = 1 
-    2,0 = 2
-    0,1 = 3
-    1,1 = 4
-    2,1 = 5
-    0,2 = 6
-    1,2 = 7
-    2,2 = 8
-    */
-    // Wrap around
-    if (x >= size)
-    {
-        x = x % size;
-    }
-    else if (x < 0)
-    {
-        x = ((size * 10) + x) % size;
-    }
-
-    if (y >= size)
-    {
-        y = y % size;
-    }
-    else if (y < 0)
-    {
-        y = ((size * 10) + y) % size;
-    }
-
-    return x + (size * y);
-}
-
-void o1(ubyte *board, uint size)
-{
-    const short o1[5][5] = {
-        {0, 0, 0, 1, 0},
-        {0, 1, 0, 1, 0},
-        {0, 0, 1, 1, 0},
-        {0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0},
-    };
-    short x, y;
-    for (y = 0; y < 5; y++)
-    {
-        for (x = 0; x < 5; x++)
-        {
-            board[coords(x, y, size)] = o1[y][x];
-        }
-    }
-}
-
-__global__ void simpleLifeKernel(const ubyte *inboard, ubyte *bufferboard, uint size)
-{
-    uint worldSize = size * size;
-
-    for (uint cellId = __mul24(blockIdx.x, blockDim.x) + threadIdx.x;
-         cellId < worldSize;
-         cellId += blockDim.x * gridDim.x)
-    {
-        uint x = cellId % size;
-        uint yAbs = cellId - x;
-        uint xLeft = (x + size - 1) % size;
-        uint xRight = (x + 1) % size;
-        uint yAbsUp = (yAbs + worldSize - size) % worldSize;
-        uint yAbsDown = (yAbs + size) % worldSize;
-
-        uint aliveCells = inboard[xLeft + yAbsUp] + inboard[x + yAbsUp] + inboard[xRight + yAbsUp] + inboard[xLeft + yAbs] + inboard[xRight + yAbs] + inboard[xLeft + yAbsDown] + inboard[x + yAbsDown] + inboard[xRight + yAbsDown];
-
-        bufferboard[x + yAbs] =
-            aliveCells == 3 || (aliveCells == 2 && inboard[x + yAbs]) ? 1 : 0;
-    }
+    bufferworld[Abs] = aliveCells == 3 || (aliveCells == 2 && inworld[Abs]) ? 1 : 0;
 }
 
 int main()
 {
-    // To keep the math easy (for reasons we will see) the size must be a square of squares, i.e. X^2^2
-    // so the value must be , so the easiest numbers to deal with are 2^n values
-    uint size = 64;
+    // To keep the math easy the size of the world must be a square of a square, i.e. X^2^2
+    // This is so we can easily divide up the world into square blocks for processing
+    // To make it even easier size should be a poer of 2, i.e. 2^X
+    uint size = 256;
+    int turns = 100000;
+
     uint ncells = size * size;
-    // The max number of threads is 1024, it must be a square number, e.g. X^2 and sqrt()
+
+    // With the max number of threads being 1024
     // The number of threads here will describe the number of blocks
-    uint threadsCount = 1024;
+    uint threadsCount = min(ncells, 1024);
     uint threadDimSize = sqrt(threadsCount);
+
     // Threads create a block of sqrt(threadCount)^2
     dim3 threadsPerBlock(threadDimSize, threadDimSize);
 
@@ -143,52 +74,82 @@ int main()
 
     printf("Size %d, ncells %d, Threads: %d, ThreadDimSize %d, BlockDimSize %d\n", size, ncells, threadsCount, threadDimSize, blockDimSize);
 
-    // boardposition = width*heigth cudaboard[width*height] == position
-    ubyte *board;
-    int boardSize = sizeof(ubyte) * ncells;
-    board = (ubyte *)malloc(boardSize);
+    // We make a 1d array of bytes, ehere each byte is a cell, to describe the world
+    ubyte *world;
+    int worldSize = sizeof(ubyte) * ncells;
+    world = (ubyte *)malloc(worldSize);
 
-    // Setup the board
-    zeroWorld(board, size);
-    o1(board, size);
-    printWorld(board, size);
+    // We setup the world by first zeroing it out, then copying a pattern (this is the glider)
+    zeroWorld(world, size);
+    ubyte pattern[5][5] = {
+        {0, 0, 0, 1, 0},
+        {0, 1, 0, 1, 0},
+        {0, 0, 1, 1, 0},
+        {0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0},
+    };
+    copy((ubyte *)pattern, 5, world, size);
+    // printWorld(world, size);
 
-    // Set up the Device Memory
-    ubyte *inboard, *bufferboard;
-    cudaMalloc((void **)&inboard, boardSize);
-    cudaMalloc((void **)&bufferboard, boardSize);
-    cudaMemcpy(inboard, board, boardSize, cudaMemcpyHostToDevice);
+    // Set up the Device Memory by create the world and a buffer
+    // Then by Mallocing on the device, then copying the world over to the device
+    ubyte *inworld, *bufferworld;
+    cudaMalloc((void **)&inworld, worldSize);
+    cudaMalloc((void **)&bufferworld, worldSize);
+    cudaMemcpy(inworld, world, worldSize, cudaMemcpyHostToDevice);
 
     // Time some stuff
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
-    int turn, turns = 10000;
+
+    // Run the world
+    int turn;
     for (turn = 0; turn < turns; turn++)
     {
-        gameoflifeturn<<<numBlocks, threadsPerBlock>>>(inboard, bufferboard, size);
-        std::swap(inboard, bufferboard);
+        gameoflifeturn<<<numBlocks, threadsPerBlock>>>(inworld, bufferworld, size);
+        std::swap(inworld, bufferworld);
     }
+
+    // Finish timing
     gettimeofday(&t1, NULL);
 
-    cudaMemcpy(board, inboard, boardSize, cudaMemcpyDeviceToHost);
-    system("clear");
-    printWorld(board, size);
+    // Copy the value of the world back to host memory
+    cudaMemcpy(world, inworld, worldSize, cudaMemcpyDeviceToHost);
 
+    // system("clear");
+    // printWorld(world, size);
+
+    // How many seconds it took to execute
     float seconds = t1.tv_sec - t0.tv_sec + 1E-6 * (t1.tv_usec - t0.tv_usec);
-    int worldsize = size * size;
-    float MM = (turns * 1.0) * worldsize;
-    float MMcellsCalculated = MM / 1000000000;
-    float total = MMcellsCalculated / seconds;
-    printf("Did %f billion cells per second in %f\n", total, seconds);
+    // How many total calculations
+    float MMcellCalculations = (1.0 * turns * ncells) / 1000000;
+    // Millions of Calculations per second
+    float MMcellsCalculatedperSecond = MMcellCalculations / seconds;
 
-    cudaFree(inboard);
-    cudaFree(bufferboard);
-    free(board);
+    printf("Did %f million cells per second in %f\n", MMcellsCalculatedperSecond, seconds);
+
+    // Free all the Device and host memory
+    cudaFree(inworld);
+    cudaFree(bufferworld);
+    free(world);
 
     return 0;
 }
 
-void zeroWorld(ubyte *board, uint size)
+void copy(ubyte *pattern, int patternsize, ubyte *world, uint size)
+{
+
+    ubyte x, y;
+    for (y = 0; y < patternsize; y++)
+    {
+        for (x = 0; x < patternsize; x++)
+        {
+            world[x + (size * y)] = pattern[x + (y * patternsize)];
+        }
+    }
+}
+
+void zeroWorld(ubyte *world, uint size)
 {
     int x, y;
 
@@ -196,12 +157,12 @@ void zeroWorld(ubyte *board, uint size)
     {
         for (x = 0; x < size; ++x)
         {
-            board[coords(x, y, size)] = 0;
+            world[x + (y * size)] = 0;
         }
     }
 }
 
-void printWorld(ubyte *board, uint size)
+void printWorld(ubyte *world, uint size)
 {
     int x, y;
 
@@ -210,7 +171,7 @@ void printWorld(ubyte *board, uint size)
     {
         for (x = 0; x < size; x++)
         {
-            printf("%d", board[coords(x, y, size)]);
+            printf("%d", world[x + (y * size)]);
         }
         printf("\n");
     }
