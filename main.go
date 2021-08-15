@@ -12,7 +12,7 @@ import (
 func main() {
 	// Size of the world in m x n
 	size := 256
-	gen := 100000
+	turns := 10000
 
 	ncells := size * size
 	cpus := runtime.NumCPU()
@@ -34,9 +34,8 @@ func main() {
 	}, world, size)
 
 	start := time.Now()
-	for i := 0; i < gen; i++ {
-		computeNextGen(world, worldBuffer, size, concurrency)
-		// swap
+	for i := 0; i < turns; i++ {
+		gameOfLifeWorldTurn(world, worldBuffer, size, concurrency)
 		tmp := world
 		world = worldBuffer
 		worldBuffer = tmp
@@ -44,14 +43,13 @@ func main() {
 	duration := time.Since(start)
 
 	//printWorld(world, size)
-	MMcellsPerSecond := float64((ncells * gen)) / (duration.Seconds() * 1000000)
-	fmt.Println("Million Cells Per Second", MMcellsPerSecond, "in", duration.Seconds(), "con", concurrency)
+	MMcellsPerSecond := float64((ncells * turns)) / (duration.Seconds() * 1000000)
+	fmt.Println("GOLANG: ", size, ",", MMcellsPerSecond, " MMCps in", duration.Seconds(), "con", concurrency)
 }
 
-func computeNextGen(univ []int, buffer []int, size int, concurrency int) {
+func gameOfLifeWorldTurn(univ []int, buffer []int, size int, concurrency int) {
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
-	//fromto, univ/2
 	for job := 0; job < concurrency; job++ {
 		go func(job int) {
 			defer func() { wg.Done() }()
@@ -60,7 +58,7 @@ func computeNextGen(univ []int, buffer []int, size int, concurrency int) {
 			x2 := (job + 1) * (size / concurrency)
 			for x := x1; x < x2; x++ {
 				for y := 0; y < size; y++ {
-					computeCell(x, y, univ, buffer, size)
+					gameOfLifeCellTurn(x, y, univ, buffer, size)
 				}
 			}
 		}(job)
@@ -68,7 +66,7 @@ func computeNextGen(univ []int, buffer []int, size int, concurrency int) {
 	wg.Wait()
 }
 
-func computeCell(x, y int, inworld []int, buffer []int, size int) {
+func gameOfLifeCellTurn(x, y int, inworld []int, buffer []int, size int) {
 	//printf("(%d,%d) (%d %d) (%d %d) (%d, %d) (%d, %d)\n", x, y, threadIdx.x, threadIdx.y, blockDim.x, blockDim.y, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
 	xLeft := ((x + size) - 1) % size
 	xRight := (x + 1) % size
